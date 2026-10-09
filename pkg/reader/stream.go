@@ -2,6 +2,7 @@ package reader
 
 import (
 	"bufio"
+	"compress/gzip"
 	"io"
 )
 
@@ -10,7 +11,7 @@ const (
 	DefaultBufferSize = 64 * 1024
 )
 
-// StreamReader reads lines from an io.Reader efficiently.
+// StreamReader reads lines from an io.Reader efficiently with transparent gzip decompression.
 type StreamReader struct {
 	reader     *bufio.Reader
 	closer     io.Closer
@@ -32,14 +33,28 @@ func WithBufferSize(size int) Option {
 	}
 }
 
-// NewStreamReader initializes a streaming reader with buffered reading.
+// NewStreamReader initializes a streaming reader with buffered reading and auto gzip detection.
 func NewStreamReader(r io.Reader, opts ...Option) *StreamReader {
-	sr := &StreamReader{
-		reader: bufio.NewReaderSize(r, DefaultBufferSize),
-		buf:    make([]byte, 0, 4096),
-	}
+	bufReader := bufio.NewReaderSize(r, DefaultBufferSize)
+	var closer io.Closer
 	if c, ok := r.(io.Closer); ok {
-		sr.closer = c
+		closer = c
+	}
+
+	// Sniff for gzip magic bytes (0x1f, 0x8b)
+	peek, err := bufReader.Peek(2)
+	if err == nil && len(peek) == 2 && peek[0] == 0x1f && peek[1] == 0x8b {
+		gzReader, gzErr := gzip.NewReader(bufReader)
+		if gzErr == nil {
+			bufReader = bufio.NewReaderSize(gzReader, DefaultBufferSize)
+			closer = gzReader
+		}
+	}
+
+	sr := &StreamReader{
+		reader: bufReader,
+		closer: closer,
+		buf:    make([]byte, 0, 4096),
 	}
 	for _, opt := range opts {
 		opt(sr)
@@ -71,7 +86,6 @@ func (s *StreamReader) NextLine() ([]byte, int64, int64, error) {
 		s.bytesRead += int64(len(chunk))
 
 		if !isPrefix {
-			// Include the newline in byte tracking
 			s.byteOffset++
 			s.bytesRead++
 			break

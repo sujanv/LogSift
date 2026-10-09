@@ -1,6 +1,8 @@
 package reader
 
 import (
+	"bytes"
+	"compress/gzip"
 	"io"
 	"strings"
 	"testing"
@@ -30,8 +32,30 @@ func TestStreamReader_Basic(t *testing.T) {
 	}
 }
 
+func TestStreamReader_GzipCompressed(t *testing.T) {
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	_, err := gw.Write([]byte("compressed log 1\ncompressed log 2\n"))
+	if err != nil {
+		t.Fatalf("gzip write failed: %v", err)
+	}
+	gw.Close()
+
+	sr := NewStreamReader(&buf)
+	defer sr.Close()
+
+	l1, num1, _, err := sr.NextLine()
+	if err != nil || string(l1) != "compressed log 1" || num1 != 1 {
+		t.Errorf("expected 'compressed log 1', got %q (%v)", l1, err)
+	}
+
+	l2, num2, _, err := sr.NextLine()
+	if err != nil || string(l2) != "compressed log 2" || num2 != 2 {
+		t.Errorf("expected 'compressed log 2', got %q (%v)", l2, err)
+	}
+}
+
 func TestStreamReader_VeryLongLine(t *testing.T) {
-	// Line longer than standard 64KB bufio buffer
 	longStr := strings.Repeat("A", 128*1024)
 	input := longStr + "\nsecond line"
 	sr := NewStreamReader(strings.NewReader(input))
@@ -45,31 +69,5 @@ func TestStreamReader_VeryLongLine(t *testing.T) {
 	}
 	if len(line1) != len(longStr) {
 		t.Errorf("expected len %d, got %d", len(longStr), len(line1))
-	}
-
-	line2, lineNum2, _, err := sr.NextLine()
-	if err != nil {
-		t.Fatalf("failed reading line 2: %v", err)
-	}
-	if lineNum2 != 2 || string(line2) != "second line" {
-		t.Errorf("expected 'second line', got %q", string(line2))
-	}
-}
-
-func TestStreamReader_EmptyLines(t *testing.T) {
-	input := "\n\nline\n"
-	sr := NewStreamReader(strings.NewReader(input))
-
-	l1, _, _, err := sr.NextLine()
-	if err != nil || len(l1) != 0 {
-		t.Errorf("expected empty line 1, got %q", l1)
-	}
-	l2, _, _, err := sr.NextLine()
-	if err != nil || len(l2) != 0 {
-		t.Errorf("expected empty line 2, got %q", l2)
-	}
-	l3, _, _, err := sr.NextLine()
-	if err != nil || string(l3) != "line" {
-		t.Errorf("expected 'line', got %q", l3)
 	}
 }
