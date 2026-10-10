@@ -77,6 +77,12 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.activeView = ViewDetail
 				}
 			}
+		case "tab", "s":
+			if m.activeView == ViewStats {
+				m.activeView = ViewLogs
+			} else {
+				m.activeView = ViewStats
+			}
 		case "esc":
 			m.activeView = ViewLogs
 		}
@@ -96,12 +102,14 @@ func (m AppModel) View() string {
 	}
 
 	header := HeaderStyle.Render("LogSift Interactive Log Explorer")
-	help := HelpStyle.Render(" [j/k] Navigate  [/] Search  [1-5] Level  [Enter] Details  [q] Quit")
+	help := HelpStyle.Render(" [j/k] Navigate  [/] Search  [1-5] Level  [Enter] Details  [Tab] Analytics  [q] Quit")
 
 	var body string
 	switch m.activeView {
 	case ViewDetail:
 		body = m.renderDetailView()
+	case ViewStats:
+		body = m.renderStatsView()
 	default:
 		if m.isSearching {
 			body = m.searchBar.View() + "\n\n" + m.renderLogTable()
