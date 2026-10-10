@@ -16,6 +16,7 @@ import (
 	"github.com/sujanv/LogSift/pkg/reader"
 	"github.com/sujanv/LogSift/pkg/stats"
 	"github.com/sujanv/LogSift/pkg/storage"
+	"github.com/sujanv/LogSift/pkg/tui"
 	_ "modernc.org/sqlite"
 )
 
@@ -27,6 +28,8 @@ func main() {
 
 	subcmd := os.Args[1]
 	switch subcmd {
+	case "tui":
+		runTUI(os.Args[2:])
 	case "search":
 		runSearch(os.Args[2:])
 	case "summarize", "stats":
@@ -425,4 +428,39 @@ func selectParser(format string, sr *reader.StreamReader) parser.Parser {
 		}
 		return parser.NewJSONParser()
 	}
+}
+
+func runTUI(args []string) {
+	files := args
+	r := getReader(files)
+	defer r.Close()
+
+	sr := reader.NewStreamReader(r)
+	defer sr.Close()
+
+	logParser := selectParser("auto", sr)
+	var records []*model.Record
+	count := 0
+
+	for {
+		line, lineNum, offset, err := sr.NextLine()
+		if err != nil || count >= 5000 {
+			break
+		}
+		if len(strings.TrimSpace(string(line))) == 0 {
+			continue
+		}
+
+		rec := &model.Record{
+			LineNum: lineNum,
+			Offset:  offset,
+			Raw:     make([]byte, len(line)),
+		}
+		copy(rec.Raw, line)
+		_ = logParser.Parse(line, rec)
+		records = append(records, rec)
+		count++
+	}
+
+	_ = tui.Run(records)
 }
