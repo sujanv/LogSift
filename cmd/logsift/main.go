@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"flag"
 	"fmt"
 	"io"
@@ -14,6 +15,8 @@ import (
 	"github.com/sujanv/LogSift/pkg/parser"
 	"github.com/sujanv/LogSift/pkg/reader"
 	"github.com/sujanv/LogSift/pkg/stats"
+	"github.com/sujanv/LogSift/pkg/storage"
+	_ "modernc.org/sqlite"
 )
 
 func main() {
@@ -28,10 +31,13 @@ func main() {
 		runSearch(os.Args[2:])
 	case "summarize", "stats":
 		runSummarize(os.Args[2:])
+	case "index":
+		runIndex(os.Args[2:])
+	case "query", "sql":
+		runQuery(os.Args[2:])
 	case "help", "-h", "--help":
 		printUsage()
 	default:
-		// Default to search if first arg is not a command
 		runSearch(os.Args[1:])
 	}
 }
@@ -45,13 +51,131 @@ Usage:
 Commands:
   search      Search and filter log streams in real-time
   summarize   Generate summary metrics (latency, error clusters, HTTP status)
+  index       Index log file into SQLite for instant SQL querying
+  query       Execute arbitrary SQL against indexed SQLite database
   help        Show help for LogSift
 
 Examples:
   logsift search --level ERROR /var/log/app.log
   logsift search --filter "status>=500 AND latency>200ms" app.log.gz
   cat access.log | logsift summarize
-  logsift summarize --report report.md app.log`)
+  logsift index --db logs.db app.log
+  logsift query --db logs.db "SELECT path, AVG(latency_ms), COUNT(*) FROM logs GROUP BY path ORDER BY 2 DESC LIMIT 5"`)
+}
+
+func runIndex(args []string) {
+	fs := flag.NewFlagSet("index", flag.ExitOnError)
+	dbFile := fs.String("db", "logs.db", "SQLite database destination")
+	format := fs.String("format", "auto", "Log format")
+	batchSize := fs.Int("batch", 10000, "Insert batch size")
+
+	_ = fs.Parse(args)
+	files := fs.Args()
+
+	r := getReader(files)
+	defer r.Close()
+
+	sr := reader.NewStreamReader(r)
+	defer sr.Close()
+
+	logParser := selectParser(*format, sr)
+	indexer, err := storage.OpenSQLite(*dbFile, *batchSize)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to initialize sqlite indexer: %v\n", err)
+		os.Exit(1)
+	}
+	defer indexer.Close()
+
+	pool := model.DefaultRecordPool
+	t0 := time.Now()
+	var count int64
+
+	for {
+		line, lineNum, offset, err := sr.NextLine()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			break
+		}
+		if len(strings.TrimSpace(string(line))) == 0 {
+			continue
+		}
+
+		count++
+		rec := pool.Get()
+		rec.LineNum = lineNum
+		rec.Offset = offset
+
+		_ = logParser.Parse(line, rec)
+		if err := indexer.Index(rec); err != nil {
+			fmt.Fprintf(os.Stderr, "index error at line %d: %v\n", lineNum, err)
+			break
+		}
+		pool.Put(rec)
+	}
+
+	_ = indexer.Flush()
+	elapsed := time.Since(t0)
+	fmt.Printf("Indexed %d logs into %s in %v (%.0f logs/sec)\n", count, *dbFile, elapsed, float64(count)/elapsed.Seconds())
+}
+
+func runQuery(args []string) {
+	fs := flag.NewFlagSet("query", flag.ExitOnError)
+	dbFile := fs.String("db", "logs.db", "SQLite database source")
+	_ = fs.Parse(args)
+
+	queryArgs := fs.Args()
+	if len(queryArgs) == 0 {
+		fmt.Fprintln(os.Stderr, "error: missing SQL query string")
+		os.Exit(1)
+	}
+	query := strings.Join(queryArgs, " ")
+
+	db, err := sql.Open("sqlite", *dbFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to open database %s: %v\n", *dbFile, err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	rows, err := db.Query(query)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "query error: %v\n", err)
+		os.Exit(1)
+	}
+	defer rows.Close()
+
+	cols, err := rows.Columns()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to get columns: %v\n", err)
+		os.Exit(1)
+	}
+
+	var tableRows [][]string
+	for rows.Next() {
+		rawVals := make([]interface{}, len(cols))
+		scanArgs := make([]interface{}, len(cols))
+		for i := range rawVals {
+			scanArgs[i] = &rawVals[i]
+		}
+		if err := rows.Scan(scanArgs...); err != nil {
+			continue
+		}
+
+		row := make([]string, len(cols))
+		for i, v := range rawVals {
+			if v == nil {
+				row[i] = "NULL"
+			} else {
+				row[i] = fmt.Sprintf("%v", v)
+			}
+		}
+		tableRows = append(tableRows, row)
+	}
+
+	term := output.NewTerminalFormatter(os.Stdout, false)
+	term.PrintTable(cols, tableRows)
 }
 
 func runSearch(args []string) {
@@ -124,7 +248,6 @@ func runSearch(args []string) {
 			rec.Message = string(line)
 		}
 
-		// Apply filters
 		if targetLevel != model.LevelUnknown && rec.Level < targetLevel {
 			pool.Put(rec)
 			continue
@@ -240,7 +363,6 @@ func runSummarize(args []string) {
 		return
 	}
 
-	// Print terminal summary
 	term := output.NewTerminalFormatter(os.Stdout, *noColor)
 	fmt.Printf("\n=== LogSift Summary ===\n")
 	fmt.Printf("Records: %d | Errors: %d | Processed in: %v\n\n", totalRecords, totalErrors, elapsed)
@@ -297,11 +419,9 @@ func selectParser(format string, sr *reader.StreamReader) parser.Parser {
 	case "syslog":
 		return parser.NewSyslogParser()
 	default:
-		// Auto-detect format by inspecting initial line
 		line, _, _, err := sr.NextLine()
 		if err == nil && len(line) > 0 {
-			p := parser.AutoDetect([][]byte{line})
-			return p
+			return parser.AutoDetect([][]byte{line})
 		}
 		return parser.NewJSONParser()
 	}
