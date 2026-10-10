@@ -65,14 +65,18 @@ func (m *Masker) MaskRecord(r *model.Record) {
 	if r.Fields != nil {
 		for k, v := range r.Fields {
 			lowerK := strings.ToLower(k)
+			isProtected := false
 			for _, sk := range sensitiveKeys {
 				if strings.Contains(lowerK, sk) {
 					r.Fields[k] = "[PROTECTED]"
+					isProtected = true
 					break
 				}
 			}
-			if strVal, ok := v.(string); ok {
-				r.Fields[k] = m.MaskText(strVal)
+			if !isProtected {
+				if strVal, ok := v.(string); ok {
+					r.Fields[k] = m.MaskText(strVal)
+				}
 			}
 		}
 	}
