@@ -69,6 +69,16 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "5":
 			m.selectedLevel = model.LevelError
 			m.applyFilters()
+		case "enter", " ":
+			if len(m.filtered) > 0 {
+				if m.activeView == ViewDetail {
+					m.activeView = ViewLogs
+				} else {
+					m.activeView = ViewDetail
+				}
+			}
+		case "esc":
+			m.activeView = ViewLogs
 		}
 
 	case tea.WindowSizeMsg:
@@ -86,13 +96,18 @@ func (m AppModel) View() string {
 	}
 
 	header := HeaderStyle.Render("LogSift Interactive Log Explorer")
-	help := HelpStyle.Render(" [j/k] Navigate  [/] Search  [1-5] Level  [q] Quit")
+	help := HelpStyle.Render(" [j/k] Navigate  [/] Search  [1-5] Level  [Enter] Details  [q] Quit")
 
 	var body string
-	if m.isSearching {
-		body = m.searchBar.View() + "\n\n" + m.renderLogTable()
-	} else {
-		body = m.renderLogTable()
+	switch m.activeView {
+	case ViewDetail:
+		body = m.renderDetailView()
+	default:
+		if m.isSearching {
+			body = m.searchBar.View() + "\n\n" + m.renderLogTable()
+		} else {
+			body = m.renderLogTable()
+		}
 	}
 
 	status := StatusStyle.Render(fmt.Sprintf("Showing %d/%d records | Level: %s", len(m.filtered), len(m.records), m.selectedLevel.String()))
