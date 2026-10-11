@@ -20,6 +20,10 @@ import (
 	"github.com/sujanv/LogSift/pkg/reader"
 	"github.com/sujanv/LogSift/pkg/server"
 	"github.com/sujanv/LogSift/pkg/stats"
+	"github.com/sujanv/LogSift/pkg/geodb"
+	"github.com/sujanv/LogSift/pkg/query"
+	"github.com/sujanv/LogSift/pkg/replay"
+	"github.com/sujanv/LogSift/pkg/security"
 	"github.com/sujanv/LogSift/pkg/storage"
 	"github.com/sujanv/LogSift/pkg/tui"
 	_ "modernc.org/sqlite"
@@ -35,6 +39,14 @@ func main() {
 	switch subcmd {
 	case "tui":
 		runTUI(os.Args[2:])
+		case "pipe":
+		runPipe(os.Args[2:])
+	case "security":
+		runSecurity(os.Args[2:])
+	case "geo":
+		runGeo(os.Args[2:])
+	case "replay":
+		runReplay(os.Args[2:])
 	case "search":
 		runSearch(os.Args[2:])
 	case "summarize", "stats":
@@ -648,4 +660,141 @@ func selectParser(format string, sr *reader.StreamReader) parser.Parser {
 		}
 		return parser.NewJSONParser()
 	}
+}
+
+func runPipe(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: logsift pipe '<pipeline-query>' [file]")
+		os.Exit(1)
+	}
+	stages, err := query.ParsePipeline(args[0])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pipe parse error: %v\n", err)
+		os.Exit(1)
+	}
+	exec, err := query.CompilePipeline(stages)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pipe compile error: %v\n", err)
+		os.Exit(1)
+	}
+
+	files := args[1:]
+	r := getReader(files)
+	defer r.Close()
+
+	sr := reader.NewStreamReader(r)
+	p := parser.NewJSONParser()
+	rec := model.DefaultRecordPool.Get()
+	defer model.DefaultRecordPool.Put(rec)
+
+	for {
+		line, _, _, err := sr.NextLine()
+		if err != nil {
+			break
+		}
+		rec.Reset()
+		_ = p.Parse(line, rec)
+		if exec.Process(rec) && exec.TopKResult() == nil {
+			fmt.Println(string(line))
+		}
+	}
+
+	if topk := exec.TopKResult(); len(topk) > 0 {
+		fmt.Println("\nTop Results:")
+		for _, item := range topk {
+			fmt.Printf("  %6d %s\n", item.Count, item.Key)
+		}
+	}
+}
+
+func runSecurity(args []string) {
+	files := args
+	r := getReader(files)
+	defer r.Close()
+
+	sr := reader.NewStreamReader(r)
+	p := parser.NewJSONParser()
+	td := security.NewThreatDetector()
+	rec := model.DefaultRecordPool.Get()
+	defer model.DefaultRecordPool.Put(rec)
+
+	for {
+		line, _, _, err := sr.NextLine()
+		if err != nil {
+			break
+		}
+		rec.Reset()
+		_ = p.Parse(line, rec)
+		td.InspectRecord(rec)
+	}
+
+	incidents := td.Incidents()
+	fmt.Printf("\n=== LogSift Security Threat Audit (%d incidents) ===\n\n", len(incidents))
+	for _, inc := range incidents {
+		fmt.Printf("[%s] %s from IP %s: %s (%s)\n",
+			inc.Severity, inc.ThreatType, inc.ClientIP, inc.Description, inc.RequestURI)
+	}
+}
+
+func runGeo(args []string) {
+	files := args
+	r := getReader(files)
+	defer r.Close()
+
+	sr := reader.NewStreamReader(r)
+	p := parser.NewJSONParser()
+	resolver := geodb.NewResolver()
+	counts := make(map[string]int)
+	rec := model.DefaultRecordPool.Get()
+	defer model.DefaultRecordPool.Put(rec)
+
+	for {
+		line, _, _, err := sr.NextLine()
+		if err != nil {
+			break
+		}
+		rec.Reset()
+		_ = p.Parse(line, rec)
+		if rec.IP != "" {
+			info := resolver.Lookup(rec.IP)
+			counts[info.CountryName]++
+		}
+	}
+
+	fmt.Println("\n=== Geographic Traffic Breakdown ===")
+	for country, cnt := range counts {
+		fmt.Printf("  %-30s %d requests\n", country, cnt)
+	}
+}
+
+func runReplay(args []string) {
+	fs := flag.NewFlagSet("replay", flag.ExitOnError)
+	target := fs.String("target", "http://localhost:8080", "Target server base URL")
+	_ = fs.Parse(args)
+
+	files := fs.Args()
+	r := getReader(files)
+	defer r.Close()
+
+	sr := reader.NewStreamReader(r)
+	p := parser.NewJSONParser()
+	replayer := replay.NewTrafficReplayer(*target, 1.0, 4)
+	rec := model.DefaultRecordPool.Get()
+	defer model.DefaultRecordPool.Put(rec)
+
+	var count int
+	for {
+		line, _, _, err := sr.NextLine()
+		if err != nil {
+			break
+		}
+		rec.Reset()
+		_ = p.Parse(line, rec)
+		if rec.Path != "" {
+			code, dur, _ := replayer.ReplaySingle(context.Background(), rec)
+			fmt.Printf("Replayed %s %s -> HTTP %d (%v)\n", rec.Method, rec.Path, code, dur)
+			count++
+		}
+	}
+	fmt.Printf("Replayed %d requests against %s\n", count, *target)
 }
