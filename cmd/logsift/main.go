@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"flag"
 	"fmt"
@@ -9,11 +10,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sujanv/LogSift/pkg/correlate"
+	"github.com/sujanv/LogSift/pkg/diff"
 	"github.com/sujanv/LogSift/pkg/filter"
+	"github.com/sujanv/LogSift/pkg/mask"
 	"github.com/sujanv/LogSift/pkg/model"
 	"github.com/sujanv/LogSift/pkg/output"
 	"github.com/sujanv/LogSift/pkg/parser"
 	"github.com/sujanv/LogSift/pkg/reader"
+	"github.com/sujanv/LogSift/pkg/server"
 	"github.com/sujanv/LogSift/pkg/stats"
 	"github.com/sujanv/LogSift/pkg/storage"
 	"github.com/sujanv/LogSift/pkg/tui"
@@ -38,6 +43,18 @@ func main() {
 		runIndex(os.Args[2:])
 	case "query", "sql":
 		runQuery(os.Args[2:])
+	case "mask":
+		runMask(os.Args[2:])
+	case "diff":
+		runDiff(os.Args[2:])
+	case "tail":
+		runTail(os.Args[2:])
+	case "correlate":
+		runCorrelate(os.Args[2:])
+	case "serve":
+		runServe(os.Args[2:])
+	case "html":
+		runHTML(os.Args[2:])
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -54,16 +71,237 @@ Usage:
 Commands:
   search      Search and filter log streams in real-time
   summarize   Generate summary metrics (latency, error clusters, HTTP status)
+  tui         Launch interactive Bubble Tea terminal log explorer
+  tail        Continuously tail a file like 'tail -f'
+  diff        Compare two log files and identify regressions/drift
+  mask        Sanitize sensitive PII (emails, cards, tokens, SSNs)
+  correlate   Assemble distributed trace waterfall by trace_id
+  html        Generate standalone offline HTML dashboard report
   index       Index log file into SQLite for instant SQL querying
   query       Execute arbitrary SQL against indexed SQLite database
-  help        Show help for LogSift
+  serve       Run embedded HTTP REST API and monitoring server
+  help        Show help for LogSift`)
+}
 
-Examples:
-  logsift search --level ERROR /var/log/app.log
-  logsift search --filter "status>=500 AND latency>200ms" app.log.gz
-  cat access.log | logsift summarize
-  logsift index --db logs.db app.log
-  logsift query --db logs.db "SELECT path, AVG(latency_ms), COUNT(*) FROM logs GROUP BY path ORDER BY 2 DESC LIMIT 5"`)
+func runMask(args []string) {
+	fs := flag.NewFlagSet("mask", flag.ExitOnError)
+	strat := fs.String("strategy", "redact", "Masking strategy: redact, mask, hash")
+	_ = fs.Parse(args)
+	files := fs.Args()
+
+	r := getReader(files)
+	defer r.Close()
+
+	sr := reader.NewStreamReader(r)
+	defer sr.Close()
+
+	m := mask.NewMasker(mask.ParseStrategy(*strat))
+
+	for {
+		line, _, _, err := sr.NextLine()
+		if err != nil {
+			break
+		}
+		fmt.Println(m.MaskText(string(line)))
+	}
+}
+
+func runDiff(args []string) {
+	if len(args) < 2 {
+		fmt.Fprintln(os.Stderr, "Usage: logsift diff <base.log> <target.log>")
+		os.Exit(1)
+	}
+	baseSnap := captureSnapshot(args[0])
+	targetSnap := captureSnapshot(args[1])
+	report := diff.Compare(baseSnap, targetSnap)
+	fmt.Println(report.FormatDelta())
+}
+
+func captureSnapshot(filePath string) *diff.Snapshot {
+	f, err := os.Open(filePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to open %s: %v\n", filePath, err)
+		os.Exit(1)
+	}
+	defer f.Close()
+
+	sr := reader.NewStreamReader(f)
+	p := parser.NewJSONParser()
+	lat := stats.NewLatencyTracker()
+	errSum := stats.NewErrorSummarizer()
+
+	var total, errs int64
+	rec := model.DefaultRecordPool.Get()
+	defer model.DefaultRecordPool.Put(rec)
+
+	for {
+		line, _, _, err := sr.NextLine()
+		if err != nil {
+			break
+		}
+		total++
+		rec.Reset()
+		_ = p.Parse(line, rec)
+		if rec.Latency > 0 {
+			lat.Add(rec.Latency)
+		}
+		if rec.Level >= model.LevelError || rec.StatusCode >= 500 {
+			errs++
+			errSum.Add(rec.Message, rec.Timestamp)
+		}
+	}
+
+	return &diff.Snapshot{
+		TotalLogs:  total,
+		ErrorCount: errs,
+		Latency:    lat.Snapshot(),
+		Errors:     errSum.TopClusters(10),
+	}
+}
+
+func runTail(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: logsift tail <file>")
+		os.Exit(1)
+	}
+	follower := reader.NewTailFollower(args[0], 250*time.Millisecond)
+	lines := make(chan []byte, 100)
+
+	go func() {
+		_ = follower.Follow(context.Background(), lines)
+	}()
+
+	for line := range lines {
+		fmt.Println(string(line))
+	}
+}
+
+func runCorrelate(args []string) {
+	fs := flag.NewFlagSet("correlate", flag.ExitOnError)
+	traceID := fs.String("trace", "", "Target trace ID")
+	_ = fs.Parse(args)
+
+	if *traceID == "" {
+		fmt.Fprintln(os.Stderr, "error: --trace flag is required")
+		os.Exit(1)
+	}
+
+	files := fs.Args()
+	r := getReader(files)
+	defer r.Close()
+
+	sr := reader.NewStreamReader(r)
+	p := parser.NewJSONParser()
+	tc := correlate.NewTraceCorrelator()
+
+	rec := model.DefaultRecordPool.Get()
+	defer model.DefaultRecordPool.Put(rec)
+
+	for {
+		line, _, _, err := sr.NextLine()
+		if err != nil {
+			break
+		}
+		rec.Reset()
+		_ = p.Parse(line, rec)
+		tc.Ingest(rec)
+	}
+
+	trace := tc.GetTrace(*traceID)
+	fmt.Println(correlate.FormatTraceTimeline(*traceID, trace))
+}
+
+func runHTML(args []string) {
+	fs := flag.NewFlagSet("html", flag.ExitOnError)
+	outFile := fs.String("out", "dashboard.html", "Output HTML path")
+	_ = fs.Parse(args)
+
+	files := fs.Args()
+	r := getReader(files)
+	defer r.Close()
+
+	sr := reader.NewStreamReader(r)
+	p := parser.NewJSONParser()
+	lat := stats.NewLatencyTracker()
+	errSum := stats.NewErrorSummarizer()
+
+	var total int64
+	rec := model.DefaultRecordPool.Get()
+	defer model.DefaultRecordPool.Put(rec)
+
+	for {
+		line, _, _, err := sr.NextLine()
+		if err != nil {
+			break
+		}
+		total++
+		rec.Reset()
+		_ = p.Parse(line, rec)
+		if rec.Latency > 0 {
+			lat.Add(rec.Latency)
+		}
+		if rec.Level >= model.LevelError {
+			errSum.Add(rec.Message, rec.Timestamp)
+		}
+	}
+
+	f, err := os.Create(*outFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to create HTML file: %v\n", err)
+		os.Exit(1)
+	}
+	defer f.Close()
+
+	gen := output.NewHTMLReportGenerator(f)
+	_ = gen.Generate(total, time.Second, lat.Snapshot(), errSum.TopClusters(10), nil)
+	fmt.Printf("HTML dashboard generated: %s\n", *outFile)
+}
+
+func runServe(args []string) {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	port := fs.String("port", "8080", "Server port")
+	_ = fs.Parse(args)
+
+	srv := server.NewServer(":"+*port, stats.NewLatencyTracker(), stats.NewErrorSummarizer())
+	if err := srv.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runTUI(args []string) {
+	files := args
+	r := getReader(files)
+	defer r.Close()
+
+	sr := reader.NewStreamReader(r)
+	defer sr.Close()
+
+	logParser := selectParser("auto", sr)
+	var records []*model.Record
+	count := 0
+
+	for {
+		line, lineNum, offset, err := sr.NextLine()
+		if err != nil || count >= 5000 {
+			break
+		}
+		if len(strings.TrimSpace(string(line))) == 0 {
+			continue
+		}
+
+		rec := &model.Record{
+			LineNum: lineNum,
+			Offset:  offset,
+			Raw:     make([]byte, len(line)),
+		}
+		copy(rec.Raw, line)
+		_ = logParser.Parse(line, rec)
+		records = append(records, rec)
+		count++
+	}
+
+	_ = tui.Run(records)
 }
 
 func runIndex(args []string) {
@@ -183,11 +421,11 @@ func runQuery(args []string) {
 
 func runSearch(args []string) {
 	fs := flag.NewFlagSet("search", flag.ExitOnError)
-	levelFilter := fs.String("level", "", "Filter by log level (DEBUG, INFO, WARN, ERROR, FATAL)")
-	exprFilter := fs.String("filter", "", "Filter expression e.g. 'status>=500 AND latency>200ms'")
-	sinceFilter := fs.String("since", "", "Filter logs within relative time duration (e.g. 15m, 2h, 1d)")
-	format := fs.String("format", "auto", "Log format: auto, json, logfmt, clf, syslog")
-	outMode := fs.String("output", "terminal", "Output mode: terminal, json, csv")
+	levelFilter := fs.String("level", "", "Filter by log level")
+	exprFilter := fs.String("filter", "", "Filter expression")
+	sinceFilter := fs.String("since", "", "Filter logs within relative time duration")
+	format := fs.String("format", "auto", "Log format")
+	outMode := fs.String("output", "terminal", "Output mode")
 	noColor := fs.Bool("no-color", false, "Disable colored ANSI output")
 
 	_ = fs.Parse(args)
@@ -232,13 +470,8 @@ func runSearch(args []string) {
 	for {
 		line, lineNum, offset, err := sr.NextLine()
 		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			fmt.Fprintf(os.Stderr, "read error at line %d: %v\n", lineNum, err)
 			break
 		}
-
 		if len(strings.TrimSpace(string(line))) == 0 {
 			continue
 		}
@@ -255,12 +488,10 @@ func runSearch(args []string) {
 			pool.Put(rec)
 			continue
 		}
-
 		if timeMatcher != nil && !timeMatcher.Match(rec) {
 			pool.Put(rec)
 			continue
 		}
-
 		if pred != nil && !pred.Match(rec) {
 			pool.Put(rec)
 			continue
@@ -274,15 +505,14 @@ func runSearch(args []string) {
 		default:
 			termOut.FormatRecord(rec)
 		}
-
 		pool.Put(rec)
 	}
 }
 
 func runSummarize(args []string) {
 	fs := flag.NewFlagSet("summarize", flag.ExitOnError)
-	reportFile := fs.String("report", "", "Write markdown report to specified file")
-	format := fs.String("format", "auto", "Log format: auto, json, logfmt, clf, syslog")
+	reportFile := fs.String("report", "", "Write markdown report")
+	format := fs.String("format", "auto", "Log format")
 	noColor := fs.Bool("no-color", false, "Disable colored ANSI output")
 
 	_ = fs.Parse(args)
@@ -303,18 +533,13 @@ func runSummarize(args []string) {
 	histogram := stats.NewTimeHistogram(time.Minute)
 
 	startTime := time.Now()
-	var totalRecords int64
-	var totalErrors int64
+	var totalRecords, totalErrors int64
 
 	for {
 		line, lineNum, offset, err := sr.NextLine()
 		if err != nil {
-			if err == io.EOF {
-				break
-			}
 			break
 		}
-
 		if len(strings.TrimSpace(string(line))) == 0 {
 			continue
 		}
@@ -331,19 +556,15 @@ func runSummarize(args []string) {
 			totalErrors++
 			errSummarizer.Add(rec.Message, rec.Timestamp)
 		}
-
 		if rec.Latency > 0 {
 			latTracker.Add(rec.Latency)
 		}
-
 		if rec.StatusCode > 0 || rec.Path != "" {
 			httpTracker.Add(rec.StatusCode, rec.Path, rec.Latency)
 		}
-
 		if !rec.Timestamp.IsZero() {
 			histogram.Add(rec.Timestamp, isErr)
 		}
-
 		pool.Put(rec)
 	}
 
@@ -356,7 +577,7 @@ func runSummarize(args []string) {
 	if *reportFile != "" {
 		f, err := os.Create(*reportFile)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "failed to create report file: %v\n", err)
+			fmt.Fprintf(os.Stderr, "failed to create report: %v\n", err)
 			os.Exit(1)
 		}
 		defer f.Close()
@@ -402,7 +623,6 @@ func getReader(files []string) io.ReadCloser {
 	if len(files) == 0 {
 		return os.Stdin
 	}
-
 	f, err := os.Open(files[0])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to open %s: %v\n", files[0], err)
@@ -428,39 +648,4 @@ func selectParser(format string, sr *reader.StreamReader) parser.Parser {
 		}
 		return parser.NewJSONParser()
 	}
-}
-
-func runTUI(args []string) {
-	files := args
-	r := getReader(files)
-	defer r.Close()
-
-	sr := reader.NewStreamReader(r)
-	defer sr.Close()
-
-	logParser := selectParser("auto", sr)
-	var records []*model.Record
-	count := 0
-
-	for {
-		line, lineNum, offset, err := sr.NextLine()
-		if err != nil || count >= 5000 {
-			break
-		}
-		if len(strings.TrimSpace(string(line))) == 0 {
-			continue
-		}
-
-		rec := &model.Record{
-			LineNum: lineNum,
-			Offset:  offset,
-			Raw:     make([]byte, len(line)),
-		}
-		copy(rec.Raw, line)
-		_ = logParser.Parse(line, rec)
-		records = append(records, rec)
-		count++
-	}
-
-	_ = tui.Run(records)
 }
