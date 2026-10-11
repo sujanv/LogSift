@@ -24,6 +24,9 @@ import (
 	"github.com/sujanv/LogSift/pkg/query"
 	"github.com/sujanv/LogSift/pkg/replay"
 	"github.com/sujanv/LogSift/pkg/security"
+	"github.com/sujanv/LogSift/pkg/archive"
+	"github.com/sujanv/LogSift/pkg/export"
+	"github.com/sujanv/LogSift/pkg/session"
 	"github.com/sujanv/LogSift/pkg/storage"
 	"github.com/sujanv/LogSift/pkg/tui"
 	_ "modernc.org/sqlite"
@@ -47,6 +50,12 @@ func main() {
 		runGeo(os.Args[2:])
 	case "replay":
 		runReplay(os.Args[2:])
+		case "archive", "partition":
+		runArchive(os.Args[2:])
+	case "session":
+		runSession(os.Args[2:])
+	case "metrics":
+		runMetrics(os.Args[2:])
 	case "search":
 		runSearch(os.Args[2:])
 	case "summarize", "stats":
@@ -797,4 +806,97 @@ func runReplay(args []string) {
 		}
 	}
 	fmt.Printf("Replayed %d requests against %s\n", count, *target)
+}
+
+func runArchive(args []string) {
+	fs := flag.NewFlagSet("archive", flag.ExitOnError)
+	outDir := fs.String("out", "archive", "Destination directory")
+	mode := fs.String("by", "date", "Partition mode: date, hour, level")
+	_ = fs.Parse(args)
+
+	files := fs.Args()
+	r := getReader(files)
+	defer r.Close()
+
+	sr := reader.NewStreamReader(r)
+	p := parser.NewJSONParser()
+	arch := archive.NewChunkArchiver(*outDir, archive.PartitionMode(*mode))
+	defer arch.Close()
+
+	rec := model.DefaultRecordPool.Get()
+	defer model.DefaultRecordPool.Put(rec)
+
+	for {
+		line, _, _, err := sr.NextLine()
+		if err != nil {
+			break
+		}
+		rec.Reset()
+		_ = p.Parse(line, rec)
+		rec.Raw = line
+		_ = arch.Archive(rec)
+	}
+	fmt.Printf("Archived logs into %s (partitioned by %s)\n", *outDir, *mode)
+}
+
+func runSession(args []string) {
+	files := args
+	r := getReader(files)
+	defer r.Close()
+
+	sr := reader.NewStreamReader(r)
+	p := parser.NewJSONParser()
+	st := session.NewSessionTracker(30 * time.Minute)
+	rec := model.DefaultRecordPool.Get()
+	defer model.DefaultRecordPool.Put(rec)
+
+	for {
+		line, _, _, err := sr.NextLine()
+		if err != nil {
+			break
+		}
+		rec.Reset()
+		_ = p.Parse(line, rec)
+		st.Ingest(rec)
+	}
+
+	sessions := st.CompleteFinalizes()
+	analytics := session.AnalyzeSessions(sessions)
+
+	fmt.Printf("\n=== User Session Analysis (%d sessions) ===\n", analytics.TotalSessions)
+	fmt.Printf("Bounce Rate:     %.2f%%\n", analytics.BounceRate)
+	fmt.Printf("Avg Requests:    %.1f per session\n", analytics.AvgRequests)
+	fmt.Printf("Avg Duration:    %v\n", analytics.AvgDuration)
+}
+
+func runMetrics(args []string) {
+	files := args
+	r := getReader(files)
+	defer r.Close()
+
+	sr := reader.NewStreamReader(r)
+	p := parser.NewJSONParser()
+	lat := stats.NewLatencyTracker()
+	var total, errs int64
+	rec := model.DefaultRecordPool.Get()
+	defer model.DefaultRecordPool.Put(rec)
+
+	for {
+		line, _, _, err := sr.NextLine()
+		if err != nil {
+			break
+		}
+		total++
+		rec.Reset()
+		_ = p.Parse(line, rec)
+		if rec.Latency > 0 {
+			lat.Add(rec.Latency)
+		}
+		if rec.Level >= model.LevelError {
+			errs++
+		}
+	}
+
+	prom := export.FormatPrometheusMetrics(total, errs, lat.Snapshot(), nil)
+	fmt.Print(prom)
 }
