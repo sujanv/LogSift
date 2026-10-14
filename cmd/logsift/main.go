@@ -27,6 +27,9 @@ import (
 	"github.com/sujanv/LogSift/pkg/archive"
 	"github.com/sujanv/LogSift/pkg/export"
 	"github.com/sujanv/LogSift/pkg/session"
+	"github.com/sujanv/LogSift/pkg/anomaly"
+	"github.com/sujanv/LogSift/pkg/cluster"
+	"github.com/sujanv/LogSift/pkg/compliance"
 	"github.com/sujanv/LogSift/pkg/storage"
 	"github.com/sujanv/LogSift/pkg/tui"
 	_ "modernc.org/sqlite"
@@ -56,6 +59,12 @@ func main() {
 		runSession(os.Args[2:])
 	case "metrics":
 		runMetrics(os.Args[2:])
+		case "anomaly":
+		runAnomaly(os.Args[2:])
+	case "cluster":
+		runCluster(os.Args[2:])
+	case "compliance", "audit":
+		runCompliance(os.Args[2:])
 	case "search":
 		runSearch(os.Args[2:])
 	case "summarize", "stats":
@@ -899,4 +908,110 @@ func runMetrics(args []string) {
 
 	prom := export.FormatPrometheusMetrics(total, errs, lat.Snapshot(), nil)
 	fmt.Print(prom)
+}
+
+func runAnomaly(args []string) {
+	files := args
+	r := getReader(files)
+	defer r.Close()
+
+	sr := reader.NewStreamReader(r)
+	p := parser.NewJSONParser()
+	det := anomaly.NewStreamingAnomalyDetector(3.0)
+	iqr := anomaly.NewIQROutlierDetector()
+	rec := model.DefaultRecordPool.Get()
+	defer model.DefaultRecordPool.Put(rec)
+
+	for {
+		line, _, _, err := sr.NextLine()
+		if err != nil {
+			break
+		}
+		rec.Reset()
+		_ = p.Parse(line, rec)
+		det.Ingest(rec)
+		if rec.Latency > 0 {
+			iqr.Add(rec.Latency)
+		}
+	}
+
+	anoms := det.Anomalies()
+	fmt.Printf("\n=== LogSift Anomaly & Outlier Detection (%d anomalies) ===\n\n", len(anoms))
+	for _, a := range anoms {
+		fmt.Printf("[%s] %s: current=%.2f%%, expected=%.2f%% (z-score: %.2f)\n",
+			a.Timestamp.Format(time.RFC3339), a.Description, a.Current*100, a.Expected*100, a.ZScore)
+	}
+	_, _, upperFence := iqr.ComputeThresholds()
+	fmt.Printf("\nLatency Outlier Upper Threshold (Q3 + 1.5*IQR): %v\n", upperFence)
+}
+
+func runCluster(args []string) {
+	files := args
+	r := getReader(files)
+	defer r.Close()
+
+	sr := reader.NewStreamReader(r)
+	p := parser.NewJSONParser()
+	clusterer := cluster.NewDrainClusterer(0.5)
+	rec := model.DefaultRecordPool.Get()
+	defer model.DefaultRecordPool.Put(rec)
+
+	for {
+		line, _, _, err := sr.NextLine()
+		if err != nil {
+			break
+		}
+		rec.Reset()
+		_ = p.Parse(line, rec)
+		clusterer.Add(rec.Message)
+	}
+
+	clusters := clusterer.Clusters()
+	fmt.Printf("\n=== Discovered Log Templates & Clusters (%d unique patterns) ===\n\n", len(clusters))
+	for _, c := range clusters {
+		fmt.Printf("[Cluster #%02d | %5d occurrences]\n  %s\n\n", c.ID, c.Size, c.Template)
+	}
+}
+
+func runCompliance(args []string) {
+	files := args
+	r := getReader(files)
+	defer r.Close()
+
+	sr := reader.NewStreamReader(r)
+	p := parser.NewJSONParser()
+	var findings []compliance.ComplianceFinding
+	var lineNum int64
+	rec := model.DefaultRecordPool.Get()
+	defer model.DefaultRecordPool.Put(rec)
+
+	for {
+		line, _, _, err := sr.NextLine()
+		if err != nil {
+			break
+		}
+		lineNum++
+		rec.Reset()
+		_ = p.Parse(line, rec)
+		rec.Raw = line
+		found := compliance.ScanRecord(lineNum, rec)
+		if len(found) > 0 {
+			findings = append(findings, found...)
+		}
+	}
+
+	report := compliance.GenerateReport(lineNum, findings)
+	fmt.Printf("\n=== LogSift Compliance & Secret Audit ===\n")
+	fmt.Printf("Total Scanned:     %d lines\n", report.TotalScanned)
+	fmt.Printf("Violations Found:  %d\n", len(report.Violations))
+	fmt.Printf("Compliance Score:  %.1f / 100\n", report.ComplianceScore)
+	fmt.Printf("Status:            ")
+	if report.Passed {
+		fmt.Println("PASSED (No exposed secrets or PHI/GDPR violations)")
+	} else {
+		fmt.Println("FAILED (Remediation required)")
+		for _, f := range report.Violations {
+			fmt.Printf("  Line %5d [%s] %s: %s\n", f.LineNumber, f.Severity, f.ViolationType, f.Description)
+		}
+	}
 }
