@@ -33,6 +33,7 @@ import (
 	"github.com/sujanv/LogSift/pkg/crypto"
 	"github.com/sujanv/LogSift/pkg/k8s"
 	"github.com/sujanv/LogSift/pkg/slowlog"
+	"github.com/sujanv/LogSift/pkg/dedup"
 	"github.com/sujanv/LogSift/pkg/storage"
 	"github.com/sujanv/LogSift/pkg/tui"
 	_ "modernc.org/sqlite"
@@ -76,6 +77,8 @@ func main() {
 		runVerify(os.Args[2:])
 	case "k8s":
 		runK8s(os.Args[2:])
+		case "dedup":
+		runDedup(os.Args[2:])
 	case "search":
 		runSearch(os.Args[2:])
 	case "summarize", "stats":
@@ -1093,5 +1096,44 @@ func runK8s(args []string) {
 		fmt.Printf("Namespace: %s\nPod Name:  %s\nContainer: %s\n", meta.Namespace, meta.PodName, meta.ContainerName)
 	} else {
 		fmt.Println("Standard container log format detected.")
+	}
+}
+
+func runDedup(args []string) {
+	files := args
+	r := getReader(files)
+	defer r.Close()
+
+	sr := reader.NewStreamReader(r)
+	p := parser.NewJSONParser()
+	d := dedup.NewWindowedDeduplicator(15 * time.Second)
+	rec := model.DefaultRecordPool.Get()
+	defer model.DefaultRecordPool.Put(rec)
+
+	var total, unique int64
+	for {
+		line, _, _, err := sr.NextLine()
+		if err != nil {
+			break
+		}
+		total++
+		rec.Reset()
+		_ = p.Parse(line, rec)
+		isNew, _ := d.Ingest(rec)
+		if isNew {
+			unique++
+		}
+	}
+
+	events := d.Flush()
+	fmt.Printf("\n=== LogSift Stream Deduplication Summary ===\n")
+	fmt.Printf("Total Lines Processed:   %d\n", total)
+	fmt.Printf("Unique Event Signatures: %d (Suppressed %d duplicates, %.1f%% noise reduction)\n\n",
+		len(events), total-int64(len(events)), float64(total-int64(len(events)))/float64(total)*100.0)
+
+	for _, ev := range events {
+		if ev.Count > 1 {
+			fmt.Printf("[Repeated %4d times] %s\n", ev.Count, ev.Original.Message)
+		}
 	}
 }
