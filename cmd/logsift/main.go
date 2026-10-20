@@ -34,6 +34,7 @@ import (
 	"github.com/sujanv/LogSift/pkg/k8s"
 	"github.com/sujanv/LogSift/pkg/slowlog"
 	"github.com/sujanv/LogSift/pkg/dedup"
+	"github.com/sujanv/LogSift/pkg/slo"
 	"github.com/sujanv/LogSift/pkg/storage"
 	"github.com/sujanv/LogSift/pkg/tui"
 	_ "modernc.org/sqlite"
@@ -79,6 +80,8 @@ func main() {
 		runK8s(os.Args[2:])
 		case "dedup":
 		runDedup(os.Args[2:])
+		case "slo":
+		runSLO(os.Args[2:])
 	case "search":
 		runSearch(os.Args[2:])
 	case "summarize", "stats":
@@ -1135,5 +1138,44 @@ func runDedup(args []string) {
 		if ev.Count > 1 {
 			fmt.Printf("[Repeated %4d times] %s\n", ev.Count, ev.Original.Message)
 		}
+	}
+}
+
+func runSLO(args []string) {
+	files := args
+	r := getReader(files)
+	defer r.Close()
+
+	sr := reader.NewStreamReader(r)
+	p := parser.NewJSONParser()
+	calc := slo.NewSLOCalculator(slo.SLIConfig{
+		TargetAvailability: 0.999,
+		LatencyThreshold:   200 * time.Millisecond,
+		TargetLatencyRatio: 0.95,
+	})
+
+	var records []*model.Record
+	for {
+		line, _, _, err := sr.NextLine()
+		if err != nil {
+			break
+		}
+		rec := model.DefaultRecordPool.Get()
+		_ = p.Parse(line, rec)
+		records = append(records, rec)
+	}
+
+	m := calc.Evaluate(records)
+	fmt.Printf("\n=== Service Level Objective (SLO) Health Check ===\n")
+	fmt.Printf("Total Requests:       %d\n", m.TotalRequests)
+	fmt.Printf("Availability SLI:     %.3f%% (Target: 99.900%%)\n", m.AvailabilityRatio*100)
+	fmt.Printf("Latency SLI (<200ms): %.3f%% (Target: 95.000%%)\n", m.LatencyRatio*100)
+	fmt.Printf("Error Budget Left:    %.1f%%\n", m.AvailabilityBudget*100)
+	fmt.Printf("Burn Rate:            %.2fx (1.0x = steady consumption)\n", m.BurnRate)
+	fmt.Printf("Status:               ")
+	if m.IsBreached {
+		fmt.Println("BREACHED ⚠️")
+	} else {
+		fmt.Println("HEALTHY ✅")
 	}
 }
