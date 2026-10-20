@@ -35,16 +35,16 @@ func ParseUserAgent(ua string) UserAgentInfo {
 	}
 
 	switch {
+	case strings.Contains(lower, "iphone") || strings.Contains(lower, "ipad"):
+		info.OS = "iOS"
+		info.Device = "Mobile"
+	case strings.Contains(lower, "android"):
+		info.OS = "Android"
+		info.Device = "Mobile"
 	case strings.Contains(lower, "windows"):
 		info.OS = "Windows"
 	case strings.Contains(lower, "macintosh") || strings.Contains(lower, "mac os x"):
 		info.OS = "macOS"
-	case strings.Contains(lower, "android"):
-		info.OS = "Android"
-		info.Device = "Mobile"
-	case strings.Contains(lower, "iphone") || strings.Contains(lower, "ipad"):
-		info.OS = "iOS"
-		info.Device = "Mobile"
 	case strings.Contains(lower, "linux"):
 		info.OS = "Linux"
 	}
