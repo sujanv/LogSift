@@ -96,3 +96,17 @@ func (v *Vectorizer) Transform(text string) map[string]float64 {
 
 	return vec
 }
+
+func CosineSimilarity(a, b map[string]float64) float64 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0.0
+	}
+
+	dot := 0.0
+	for k, va := range a {
+		if vb, ok := b[k]; ok {
+			dot += va * vb
+		}
+	}
+	return dot
+}
