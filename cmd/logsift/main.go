@@ -35,6 +35,7 @@ import (
 	"github.com/sujanv/LogSift/pkg/slowlog"
 	"github.com/sujanv/LogSift/pkg/dedup"
 	"github.com/sujanv/LogSift/pkg/slo"
+	"github.com/sujanv/LogSift/pkg/logql"
 	"github.com/sujanv/LogSift/pkg/storage"
 	"github.com/sujanv/LogSift/pkg/tui"
 	_ "modernc.org/sqlite"
@@ -88,6 +89,8 @@ func main() {
 		runShip(os.Args[2:])
 	case "spool":
 		runSpool(os.Args[2:])
+	case "logql":
+		runLogQL(os.Args[2:])
 	case "search":
 		runSearch(os.Args[2:])
 	case "summarize", "stats":
@@ -1196,4 +1199,40 @@ func runShip(args []string) {
 
 func runSpool(args []string) {
 	fmt.Println("Spool queue active: 0 queued items on disk.")
+}
+
+func runLogQL(args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage: logsift logql <query> [file...]")
+		return
+	}
+	qStr := args[0]
+	q, err := logql.Parse(qStr)
+	if err != nil {
+		fmt.Printf("LogQL parse error: %v\n", err)
+		return
+	}
+	files := args[1:]
+	r := getReader(files)
+	defer r.Close()
+
+	sr := reader.NewStreamReader(r)
+	p := parser.NewJSONParser()
+	rec := model.DefaultRecordPool.Get()
+	defer model.DefaultRecordPool.Put(rec)
+
+	var matched int64
+	for {
+		line, _, _, err := sr.NextLine()
+		if err != nil {
+			break
+		}
+		rec.Reset()
+		_ = p.Parse(line, rec)
+		if q.Matches(rec) {
+			matched++
+			fmt.Println(string(line))
+		}
+	}
+	fmt.Printf("\n[LogQL Query Matched: %d records]\n", matched)
 }
