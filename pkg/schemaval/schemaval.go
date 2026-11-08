@@ -101,3 +101,46 @@ func (sv *SchemaValidator) Validate(rec *model.Record) []string {
 
 	return errs
 }
+
+type DriftEvent struct {
+	Field    string    `json:"field"`
+	OldType  FieldType `json:"old_type"`
+	NewType  FieldType `json:"new_type"`
+	IsNew    bool      `json:"is_new"`
+	Message  string    `json:"message"`
+}
+
+func (sv *SchemaValidator) DetectDrift(rec *model.Record) []DriftEvent {
+	if rec == nil || rec.Fields == nil {
+		return nil
+	}
+
+	sv.mu.Lock()
+	defer sv.mu.Unlock()
+
+	var drifts []DriftEvent
+	for k, v := range rec.Fields {
+		act := DetectType(v)
+		prev, exists := sv.observedTypes[k]
+		if !exists {
+			sv.observedTypes[k] = act
+			drifts = append(drifts, DriftEvent{
+				Field:   k,
+				NewType: act,
+				IsNew:   true,
+				Message: fmt.Sprintf("new uncataloged field introduced: %s (%s)", k, act),
+			})
+		} else if prev != act && act != TypeUnknown {
+			sv.observedTypes[k] = act
+			drifts = append(drifts, DriftEvent{
+				Field:   k,
+				OldType: prev,
+				NewType: act,
+				IsNew:   false,
+				Message: fmt.Sprintf("schema type mutation on field %s: %s -> %s", k, prev, act),
+			})
+		}
+	}
+
+	return drifts
+}
