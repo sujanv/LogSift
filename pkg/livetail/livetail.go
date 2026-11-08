@@ -87,3 +87,22 @@ func (m *Multiplexer) Start(ctx context.Context) <-chan StreamEvent {
 
 	return m.outCh
 }
+
+type HeartbeatController struct {
+	interval time.Duration
+	stopCh   chan struct{}
+}
+
+func NewHeartbeatController(interval time.Duration) *HeartbeatController {
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	return &HeartbeatController{
+		interval: interval,
+		stopCh:   make(chan struct{}),
+	}
+}
+
+func (h *HeartbeatController) Stop() {
+	close(h.stopCh)
+}
