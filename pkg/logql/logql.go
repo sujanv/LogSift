@@ -53,6 +53,24 @@ func Parse(query string) (*Query, error) {
 		Stages:   make([]PipelineStage, 0),
 	}
 
+	if strings.HasPrefix(q, "rate(") {
+		result.MetricFunc = "rate"
+		closeParen := strings.Index(q, ")")
+		if closeParen != -1 {
+			inner := q[5:closeParen]
+			rem := q[closeParen+1:]
+			q = inner + " " + rem
+		}
+	} else if strings.HasPrefix(q, "count_over_time(") {
+		result.MetricFunc = "count_over_time"
+		closeParen := strings.Index(q, ")")
+		if closeParen != -1 {
+			inner := q[16:closeParen]
+			rem := q[closeParen+1:]
+			q = inner + " " + rem
+		}
+	}
+
 	return parseInnerQuery(q, result)
 }
 
