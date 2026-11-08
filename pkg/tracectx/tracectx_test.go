@@ -2,6 +2,7 @@ package tracectx
 
 import (
 	"testing"
+	"github.com/sujanv/LogSift/pkg/model"
 )
 
 func TestParseTraceParent(t *testing.T) {
@@ -26,5 +27,16 @@ func TestParseTraceParent(t *testing.T) {
 	state := ParseTraceState("rojo=123,congo=456")
 	if state["rojo"] != "123" || state["congo"] != "456" {
 		t.Errorf("tracestate parse failure: %+v", state)
+	}
+}
+
+func TestEnrichWithTraceContext(t *testing.T) {
+	rec := &model.Record{}
+	EnrichWithTraceContext(rec, "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", "rojo=123")
+	if rec.TraceID != "4bf92f3577b34da6a3ce929d0e0e4736" {
+		t.Errorf("trace ID mismatch: %s", rec.TraceID)
+	}
+	if rec.SpanID != "00f067aa0ba902b7" {
+		t.Errorf("span ID mismatch: %s", rec.SpanID)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"github.com/sujanv/LogSift/pkg/model"
 )
 
 type TraceContext struct {
@@ -83,4 +84,29 @@ func ParseTraceState(header string) map[string]string {
 		}
 	}
 	return state
+}
+
+func EnrichWithTraceContext(rec *model.Record, traceParent, traceState string) {
+	if rec == nil {
+		return
+	}
+	tc, err := ParseTraceParent(traceParent)
+	if err == nil {
+		rec.TraceID = tc.TraceID
+		rec.SpanID = tc.SpanID
+		if rec.Fields == nil {
+			rec.Fields = make(map[string]interface{})
+		}
+		rec.Fields["trace_sampled"] = tc.Sampled
+		rec.Fields["trace_version"] = tc.Version
+	}
+	if traceState != "" {
+		ts := ParseTraceState(traceState)
+		if len(ts) > 0 {
+			if rec.Fields == nil {
+				rec.Fields = make(map[string]interface{})
+			}
+			rec.Fields["tracestate"] = ts
+		}
+	}
 }
