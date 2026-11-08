@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"github.com/sujanv/LogSift/pkg/model"
 )
 
 type MatchOp string
@@ -164,4 +165,87 @@ func unquote(s string) string {
 		}
 	}
 	return s
+}
+
+func (q *Query) Matches(rec *model.Record) bool {
+	if rec == nil {
+		return false
+	}
+
+	for _, m := range q.Matchers {
+		var val string
+		switch strings.ToLower(m.Key) {
+		case "level":
+			val = strings.ToLower(rec.Level.String())
+		case "path":
+			val = rec.Path
+		case "method":
+			val = rec.Method
+		case "ip":
+			val = rec.IP
+		case "user_id":
+			val = rec.UserID
+		case "trace_id":
+			val = rec.TraceID
+		default:
+			if rec.Fields != nil {
+				if fv, ok := rec.Fields[m.Key]; ok {
+					val = fmt.Sprintf("%v", fv)
+				}
+			}
+		}
+
+		match := false
+		switch m.Op {
+		case OpEqual:
+			match = strings.EqualFold(val, m.Value)
+		case OpNotEqual:
+			match = !strings.EqualFold(val, m.Value)
+		case OpRegex:
+			match = m.Re != nil && m.Re.MatchString(val)
+		case OpNotRegex:
+			match = m.Re != nil && !m.Re.MatchString(val)
+		}
+		if !match {
+			return false
+		}
+	}
+
+	msg := rec.Message
+	if msg == "" && len(rec.Raw) > 0 {
+		msg = string(rec.Raw)
+	}
+
+	for _, stage := range q.Stages {
+		switch stage.Op {
+		case OpContains:
+			if !strings.Contains(msg, stage.Value) {
+				return false
+			}
+		case OpExcludes:
+			if strings.Contains(msg, stage.Value) {
+				return false
+			}
+		case OpRegMatch:
+			if stage.Re != nil && !stage.Re.MatchString(msg) {
+				return false
+			}
+		case OpRegExcl:
+			if stage.Re != nil && stage.Re.MatchString(msg) {
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
+func (q *Query) FilterRecords(records []*model.Record) []*model.Record {
+	var filtered []*model.Record
+	for _, r := range records {
+		if q.Matches(r) {
+			filtered = append(filtered, r)
+		}
+	}
+	return filtered
 }
