@@ -36,6 +36,7 @@ import (
 	"github.com/sujanv/LogSift/pkg/dedup"
 	"github.com/sujanv/LogSift/pkg/slo"
 	"github.com/sujanv/LogSift/pkg/logql"
+	"github.com/sujanv/LogSift/pkg/livetail"
 	"github.com/sujanv/LogSift/pkg/storage"
 	"github.com/sujanv/LogSift/pkg/tui"
 	_ "modernc.org/sqlite"
@@ -91,6 +92,8 @@ func main() {
 		runSpool(os.Args[2:])
 	case "logql":
 		runLogQL(os.Args[2:])
+	case "livetail":
+		runLiveTail(os.Args[2:])
 	case "search":
 		runSearch(os.Args[2:])
 	case "summarize", "stats":
@@ -1235,4 +1238,27 @@ func runLogQL(args []string) {
 		}
 	}
 	fmt.Printf("\n[LogQL Query Matched: %d records]\n", matched)
+}
+
+func runLiveTail(args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage: logsift livetail <file1> [file2...]")
+		return
+	}
+	mux := livetail.NewMultiplexer(1000)
+	for _, p := range args {
+		_ = mux.AddFile(p)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch := mux.Start(ctx)
+	fmt.Printf("Streaming lines from %d files...\n", len(args))
+	count := 0
+	for ev := range ch {
+		fmt.Printf("[%s] %s\n", ev.Source, ev.Line)
+		count++
+		if count >= 20 {
+			break
+		}
+	}
 }
