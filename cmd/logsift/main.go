@@ -37,6 +37,8 @@ import (
 	"github.com/sujanv/LogSift/pkg/slo"
 	"github.com/sujanv/LogSift/pkg/logql"
 	"github.com/sujanv/LogSift/pkg/livetail"
+	"github.com/sujanv/LogSift/pkg/schemaval"
+	"github.com/sujanv/LogSift/pkg/tracectx"
 	"github.com/sujanv/LogSift/pkg/storage"
 	"github.com/sujanv/LogSift/pkg/tui"
 	_ "modernc.org/sqlite"
@@ -94,6 +96,10 @@ func main() {
 		runLogQL(os.Args[2:])
 	case "livetail":
 		runLiveTail(os.Args[2:])
+	case "schemaval":
+		runSchemaVal(os.Args[2:])
+	case "trace-w3c":
+		runTraceW3C(os.Args[2:])
 	case "search":
 		runSearch(os.Args[2:])
 	case "summarize", "stats":
@@ -1261,4 +1267,67 @@ func runLiveTail(args []string) {
 			break
 		}
 	}
+}
+
+func runSchemaVal(args []string) {
+	files := args
+	r := getReader(files)
+	defer r.Close()
+
+	sr := reader.NewStreamReader(r)
+	p := parser.NewJSONParser()
+	val := schemaval.NewSchemaValidator([]string{"timestamp", "level", "message"}, nil)
+	rec := model.DefaultRecordPool.Get()
+	defer model.DefaultRecordPool.Put(rec)
+
+	var total, valid, driftCount int64
+	for {
+		line, _, _, err := sr.NextLine()
+		if err != nil {
+			break
+		}
+		total++
+		rec.Reset()
+		_ = p.Parse(line, rec)
+		errs := val.Validate(rec)
+		if len(errs) == 0 {
+			valid++
+		}
+		drifts := val.DetectDrift(rec)
+		driftCount += int64(len(drifts))
+	}
+	fmt.Printf("\n=== Log Schema Validation & Drift Report ===\n")
+	fmt.Printf("Total Records Evaluated: %d\n", total)
+	if total > 0 {
+		fmt.Printf("Valid Schema Adherence:  %d (%.1f%%)\n", valid, float64(valid)/float64(total)*100.0)
+	}
+	fmt.Printf("Schema Drift Anomalies:  %d\n", driftCount)
+}
+
+func runTraceW3C(args []string) {
+	files := args
+	r := getReader(files)
+	defer r.Close()
+
+	sr := reader.NewStreamReader(r)
+	p := parser.NewJSONParser()
+	rec := model.DefaultRecordPool.Get()
+	defer model.DefaultRecordPool.Put(rec)
+
+	var parsed int64
+	for {
+		line, _, _, err := sr.NextLine()
+		if err != nil {
+			break
+		}
+		rec.Reset()
+		_ = p.Parse(line, rec)
+		if rec.Fields != nil {
+			if tp, ok := rec.Fields["traceparent"].(string); ok {
+				tracectx.EnrichWithTraceContext(rec, tp, "")
+				parsed++
+			}
+		}
+	}
+	fmt.Printf("\nParsed and correlated %d W3C traceparent headers.\n", parsed)
 }
