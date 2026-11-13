@@ -54,14 +54,14 @@
                                   |
                                   v
                         [ AutoDetect / Parser ]
-           (JSON / Logfmt / CLF / Syslog / CRI / Slowlog / UserAgent / W3C Trace)
+    (JSON / Logfmt / CLF / Syslog / CRI / Slowlog / UserAgent / W3C Trace / OTLP)
                                   |
                     +-------------+-------------+
                     |                           |
                     v                           v
           [ Filter / Masker ]          [ Streaming Aggregators ]
        (LogQL, Regex, Timestamps,    (EWMA Anomaly, Drain Cluster, SLO,
-         Luhn PII Sanitization)        T-Digest P99.9, HLL Cardinality,
+        Pseudonymization Engine)       Cost Estimator, GeoHeatmap,
                     |                  TF-IDF Vectorizer & Cosine Similarity)
        +------------+------------+              |
        |            |            |              |
@@ -71,12 +71,12 @@
        +------------+------------+--------------+
                     |
                     v
-  [Circuit Breaker / Remote Shipper / Disk Spooler / LiveTail Mux]
+  [Flight Recorder / Circuit Breaker / Remote Shipper / LiveTail Mux]
                     |
        +------------+------------+
        |                         |
        v                         v
-  [Bubble Tea TUI]       [SQLite Index / Replayer]
+  [Bubble Tea TUI]       [Differential Diagnosis / Replayer]
 ```
 
 ---
