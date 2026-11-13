@@ -39,6 +39,7 @@ import (
 	"github.com/sujanv/LogSift/pkg/livetail"
 	"github.com/sujanv/LogSift/pkg/schemaval"
 	"github.com/sujanv/LogSift/pkg/tracectx"
+	"github.com/sujanv/LogSift/pkg/cost"
 	"github.com/sujanv/LogSift/pkg/storage"
 	"github.com/sujanv/LogSift/pkg/tui"
 	_ "modernc.org/sqlite"
@@ -100,6 +101,8 @@ func main() {
 		runSchemaVal(os.Args[2:])
 	case "trace-w3c":
 		runTraceW3C(os.Args[2:])
+	case "cost":
+		runCost(os.Args[2:])
 	case "search":
 		runSearch(os.Args[2:])
 	case "summarize", "stats":
@@ -1330,4 +1333,52 @@ func runTraceW3C(args []string) {
 		}
 	}
 	fmt.Printf("\nParsed and correlated %d W3C traceparent headers.\n", parsed)
+}
+
+func runCost(args []string) {
+	provider := cost.ProviderAWSCloudWatch
+	files := args
+	if len(args) > 0 && strings.HasPrefix(args[0], "--provider=") {
+		prov := strings.TrimPrefix(args[0], "--provider=")
+		switch prov {
+		case "datadog":
+			provider = cost.ProviderDatadog
+		case "splunk":
+			provider = cost.ProviderSplunk
+		case "gcp":
+			provider = cost.ProviderGCPLogging
+		default:
+			provider = cost.ProviderAWSCloudWatch
+		}
+		files = args[1:]
+	}
+	r := getReader(files)
+	defer r.Close()
+
+	sr := reader.NewStreamReader(r)
+	p := parser.NewJSONParser()
+	ce := cost.NewCostEstimator()
+	rec := model.DefaultRecordPool.Get()
+	defer model.DefaultRecordPool.Put(rec)
+
+	for {
+		line, _, _, err := sr.NextLine()
+		if err != nil {
+			break
+		}
+		rec.Reset()
+		_ = p.Parse(line, rec)
+		ce.IngestService(rec, int64(len(line)))
+	}
+
+	rep := ce.Report(provider)
+	fmt.Printf("\n=== Log Ingestion & Retention Cost Estimation ===\n")
+	fmt.Printf("Target Provider:   %s\n", strings.ToUpper(string(rep.Provider)))
+	fmt.Printf("Total Events:      %d\n", rep.TotalEvents)
+	fmt.Printf("Volume Processed:  %.3f GB (%d bytes)\n", rep.TotalGigabytes, rep.TotalBytes)
+	fmt.Printf("Estimated Cost:    $%.2f USD / mo\n\n", rep.EstimatedCostUSD*30)
+	fmt.Println("Top Cost by Log Level:")
+	for lvl, c := range rep.ByLevel {
+		fmt.Printf("  - %-7s: $%.2f USD/mo\n", lvl, c*30)
+	}
 }
