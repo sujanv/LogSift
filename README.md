@@ -245,6 +245,19 @@ go install github.com/sujanv/LogSift/cmd/logsift@latest
 
 ---
 
+
+### 23. Log Ingestion & Cloud Billing Cost Estimation
+```bash
+# Estimate monthly ingestion costs across AWS CloudWatch, Datadog, Splunk, or GCP
+./logsift cost --provider=datadog production.log
+```
+
+### 24. Automated Differential Root-Cause Diagnosis
+```bash
+# Compare baseline vs incident time window and rank top anomaly culprits
+./logsift diagnose baseline.log incident.log
+```
+
 ## ⚡ Benchmarks
 
 Tested on Apple M-series / 100,000 log records:
