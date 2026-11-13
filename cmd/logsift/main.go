@@ -40,6 +40,7 @@ import (
 	"github.com/sujanv/LogSift/pkg/schemaval"
 	"github.com/sujanv/LogSift/pkg/tracectx"
 	"github.com/sujanv/LogSift/pkg/cost"
+	"github.com/sujanv/LogSift/pkg/diagnose"
 	"github.com/sujanv/LogSift/pkg/storage"
 	"github.com/sujanv/LogSift/pkg/tui"
 	_ "modernc.org/sqlite"
@@ -103,6 +104,8 @@ func main() {
 		runTraceW3C(os.Args[2:])
 	case "cost":
 		runCost(os.Args[2:])
+	case "diagnose":
+		runDiagnose(os.Args[2:])
 	case "search":
 		runSearch(os.Args[2:])
 	case "summarize", "stats":
@@ -1380,5 +1383,63 @@ func runCost(args []string) {
 	fmt.Println("Top Cost by Log Level:")
 	for lvl, c := range rep.ByLevel {
 		fmt.Printf("  - %-7s: $%.2f USD/mo\n", lvl, c*30)
+	}
+}
+
+func runDiagnose(args []string) {
+	if len(args) < 2 {
+		fmt.Println("Usage: logsift diagnose <baseline.log> <incident.log>")
+		return
+	}
+	fBase, err := os.Open(args[0])
+	if err != nil {
+		fmt.Printf("Error opening baseline log: %v\n", err)
+		return
+	}
+	defer fBase.Close()
+	srBase := reader.NewStreamReader(fBase)
+	p := parser.NewJSONParser()
+
+	var baseline []*model.Record
+	for {
+		line, _, _, err := srBase.NextLine()
+		if err != nil {
+			break
+		}
+		r := &model.Record{}
+		_ = p.Parse(line, r)
+		baseline = append(baseline, r)
+	}
+
+	fInc, err := os.Open(args[1])
+	if err != nil {
+		fmt.Printf("Error opening incident log: %v\n", err)
+		return
+	}
+	defer fInc.Close()
+	srInc := reader.NewStreamReader(fInc)
+
+	var incident []*model.Record
+	for {
+		line, _, _, err := srInc.NextLine()
+		if err != nil {
+			break
+		}
+		r := &model.Record{}
+		_ = p.Parse(line, r)
+		incident = append(incident, r)
+	}
+
+	rep := diagnose.Diagnose(baseline, incident)
+	fmt.Printf("\n=== Automated Root Cause & Differential Diagnosis ===\n")
+	fmt.Printf("Baseline Events: %d | Incident Events: %d\n\n", rep.TotalBaseline, rep.TotalIncident)
+	fmt.Println("Top Anomalous Incident Culprits:")
+	for i, c := range rep.TopCulprits {
+		status := "ELEVATED"
+		if c.IsNewAnomaly {
+			status = "NEW ANOMALY 🚨"
+		}
+		fmt.Printf("%2d. [%s] Relative Risk: %.1fx (Base: %d, Inc: %d)\n    %s\n",
+			i+1, status, c.RelativeRisk, c.BaselineCount, c.IncidentCount, c.Signature)
 	}
 }
