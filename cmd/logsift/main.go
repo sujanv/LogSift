@@ -42,6 +42,7 @@ import (
 	"github.com/sujanv/LogSift/pkg/cost"
 	"github.com/sujanv/LogSift/pkg/diagnose"
 	"github.com/sujanv/LogSift/pkg/pseudonym"
+	"github.com/sujanv/LogSift/pkg/geoheat"
 	"github.com/sujanv/LogSift/pkg/storage"
 	"github.com/sujanv/LogSift/pkg/tui"
 	_ "modernc.org/sqlite"
@@ -109,6 +110,8 @@ func main() {
 		runDiagnose(os.Args[2:])
 	case "pseudonym":
 		runPseudonym(os.Args[2:])
+	case "geoheat":
+		runGeoHeat(os.Args[2:])
 	case "search":
 		runSearch(os.Args[2:])
 	case "summarize", "stats":
@@ -1475,4 +1478,43 @@ func runPseudonym(args []string) {
 		count++
 	}
 	fmt.Printf("\n[Pseudonymized %d records successfully]\n", count)
+}
+
+func runGeoHeat(args []string) {
+	files := args
+	r := getReader(files)
+	defer r.Close()
+
+	sr := reader.NewStreamReader(r)
+	p := parser.NewJSONParser()
+	hm := geoheat.NewRegionalHeatmap(250 * time.Millisecond)
+	rec := model.DefaultRecordPool.Get()
+	defer model.DefaultRecordPool.Put(rec)
+
+	for {
+		line, _, _, err := sr.NextLine()
+		if err != nil {
+			break
+		}
+		rec.Reset()
+		_ = p.Parse(line, rec)
+		country := "US"
+		if rec.Fields != nil {
+			if c, ok := rec.Fields["country"].(string); ok && c != "" {
+				country = c
+			}
+		}
+		hm.Record(country, rec.Latency)
+	}
+
+	metrics := hm.Summary()
+	fmt.Printf("\n=== Multi-Region Latency & Route Heatmap ===\n")
+	for _, m := range metrics {
+		status := "HEALTHY ✅"
+		if m.Degraded {
+			status = "DEGRADED ⚠️"
+		}
+		fmt.Printf("%-8s | Hits: %6d | Avg: %8s | P95: %8s | %s\n",
+			m.Country, m.TotalHits, m.AvgLatency, m.P95Latency, status)
+	}
 }
