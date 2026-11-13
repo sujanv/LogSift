@@ -41,6 +41,7 @@ import (
 	"github.com/sujanv/LogSift/pkg/tracectx"
 	"github.com/sujanv/LogSift/pkg/cost"
 	"github.com/sujanv/LogSift/pkg/diagnose"
+	"github.com/sujanv/LogSift/pkg/pseudonym"
 	"github.com/sujanv/LogSift/pkg/storage"
 	"github.com/sujanv/LogSift/pkg/tui"
 	_ "modernc.org/sqlite"
@@ -106,6 +107,8 @@ func main() {
 		runCost(os.Args[2:])
 	case "diagnose":
 		runDiagnose(os.Args[2:])
+	case "pseudonym":
+		runPseudonym(os.Args[2:])
 	case "search":
 		runSearch(os.Args[2:])
 	case "summarize", "stats":
@@ -1442,4 +1445,34 @@ func runDiagnose(args []string) {
 		fmt.Printf("%2d. [%s] Relative Risk: %.1fx (Base: %d, Inc: %d)\n    %s\n",
 			i+1, status, c.RelativeRisk, c.BaselineCount, c.IncidentCount, c.Signature)
 	}
+}
+
+func runPseudonym(args []string) {
+	salt := "enterprise-default-salt"
+	files := args
+	if len(args) > 0 && strings.HasPrefix(args[0], "--salt=") {
+		salt = strings.TrimPrefix(args[0], "--salt=")
+		files = args[1:]
+	}
+	r := getReader(files)
+	defer r.Close()
+
+	sr := reader.NewStreamReader(r)
+	p := parser.NewJSONParser()
+	ps := pseudonym.NewPseudonymizer(salt)
+	rec := model.DefaultRecordPool.Get()
+	defer model.DefaultRecordPool.Put(rec)
+
+	var count int64
+	for {
+		line, _, _, err := sr.NextLine()
+		if err != nil {
+			break
+		}
+		rec.Reset()
+		_ = p.Parse(line, rec)
+		ps.TokenizeRecord(rec)
+		count++
+	}
+	fmt.Printf("\n[Pseudonymized %d records successfully]\n", count)
 }
