@@ -50,3 +50,25 @@ func (fr *FlightRecorder) Clear() {
 	fr.size = 0
 	fr.head = 0
 }
+
+func (fr *FlightRecorder) FlushOnFault(faultRec *model.Record) []*model.Record {
+	fr.mu.Lock()
+	defer fr.mu.Unlock()
+
+	out := make([]*model.Record, 0, fr.size+1)
+	start := (fr.head - fr.size + fr.capacity) % fr.capacity
+	for i := 0; i < fr.size; i++ {
+		idx := (start + i) % fr.capacity
+		if fr.ring[idx] != nil {
+			out = append(out, fr.ring[idx])
+		}
+	}
+
+	if faultRec != nil {
+		out = append(out, faultRec)
+	}
+
+	fr.size = 0
+	fr.head = 0
+	return out
+}
